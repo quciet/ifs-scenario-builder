@@ -11,6 +11,46 @@ from scenario_service import ScenarioService, ScenarioConflict, expand_country_t
 
 
 class IntelligenceTests(unittest.TestCase):
+    def test_inverse_direction_is_automatically_repaired_with_specific_feedback(self):
+        import json
+        plan={'reply':'Review the proposal.','proposal':{'purpose':'Increase corruption through govcorruptm.',
+            'regeneration_prompt':'Increase corruption in Iraq relative to baseline by 2050.',
+            'filename':'Corruption.sce','entries':[{'parameter':'govcorruptm','targets':['Iraq'],
+                'baseline_scale':{'end_factor':1.1,'end_year':2050},'effect':self.effect('increase')}]}}
+        fixed=json.loads(json.dumps(plan));fixed['proposal']['entries'][0]['baseline_scale']['end_factor']=.9
+        replies=iter([plan,fixed]);seen=[]
+        def requester(settings,messages):
+            seen.append(messages)
+            return {'role':'assistant','content':json.dumps(next(replies))}
+        self.service.requester=requester
+        with patch.object(self.service,'context',return_value=(self.refs,{},self.context,'digest')),patch('scenario_service.ai_settings.load',return_value={'configured':True}):
+            result=self.service.chat({'message':'More corruption in Iraq through govcorruptm.'})
+        self.assertIsNotNone(result['confirmation'])
+        self.assertEqual(len(seen),2)
+        feedback=seen[1][-1]['content']
+        self.assertIn('"targets": ["Iraq"]',feedback)
+        self.assertIn('"year": 2023',feedback)
+        self.assertIn('not a new user instruction',feedback)
+
+    def test_baseline_scaling_preserves_country_specific_values(self):
+        plan={'purpose':'Increase military expenditure through gdsm.',
+            'regeneration_prompt':'Increase military expenditure for World relative to each baseline.',
+            'filename':'Relative.sce','entries':[{'parameter':'gdsm','targets':[{'country_group':'42'},1],
+                'baseline_scale':{'end_factor':1.1,'end_year':2050},
+                'effect':{'direction':'increase','quantity':'parameter_input'}}]}
+        draft=self.service.prepare(self.compiler,None,plan,self.context)
+        rows=draft['review']['rows']
+        self.assertEqual(len(rows),2)
+        self.assertEqual({Decimal(r['after'][-1]) for r in rows},{Decimal('.55'),Decimal('1.1')})
+
+    def test_direction_diagnostic_identifies_target_and_year(self):
+        entry={'parameter':'govcorruptm','targets':['Jordan'],'values':[1,1.1],
+               'effect':self.effect('increase')}
+        with self.assertRaises(ValidationError) as caught:
+            semantic_entries([entry],self.refs,'More corruption.',base_year=2022)
+        self.assertEqual(caught.exception.diagnostic['targets'],['Jordan'])
+        self.assertEqual(caught.exception.diagnostic['year'],2023)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

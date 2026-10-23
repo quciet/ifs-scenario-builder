@@ -17,6 +17,46 @@ def proposal():
 
 
 class ScenarioServiceTests(unittest.TestCase):
+    def test_missing_explicit_parameter_clarifies_without_paid_research(self):
+        result=self.service.chat({'message':'Increase agricultural yield (missingylm).'})
+        self.assertIn('not an installed parameter',result['reply'])
+        self.assertEqual(self.seen,[])
+        self.assertEqual(result['usage']['calls'],0)
+
+    def test_invalid_generated_country_is_repaired_without_reasking_intent(self):
+        bad=proposal();bad['proposal']['entries'][0]['targets']=['Invented country']
+        self.answer(bad);self.answer(proposal())
+        result=self.service.chat({'message':'Double Iraq yield.'})
+        self.assertIsNotNone(result['confirmation'])
+        self.assertEqual(len(self.seen),2)
+        feedback=self.seen[1][1][-1]['content']
+        self.assertIn('LOCAL VALIDATOR FEEDBACK',feedback)
+        self.assertIn('Invented country',feedback)
+        self.assertTrue(all('_internal' not in m for m in self.seen[1][1]))
+
+    def test_different_validation_repairs_count_as_progress(self):
+        bad=proposal();bad['proposal']['entries'][0]['parameter']='invented'
+        self.answer(bad);self.answer(bad)
+        bad=proposal();bad['proposal']['entries'][0]['targets']=['Invented country']
+        self.answer(bad);self.answer(proposal())
+        result=self.service.chat({'message':'Double Iraq yield.'})
+        self.assertIsNotNone(result['confirmation'])
+        self.assertEqual(len(self.seen),4)
+
+    def test_repeated_invalid_candidate_can_continue_after_restart(self):
+        bad=proposal();bad['proposal']['entries'][0]['parameter']='invented'
+        for _ in range(3):self.answer(bad)
+        paused=self.service.chat({'message':'Double Iraq yield.'})
+        self.assertEqual(paused['research']['reason'],'validation')
+        self.assertIsNone(paused['confirmation'])
+        self.service.persist_sessions()
+        restored=ScenarioService(self.root,lambda:'fixture',self.service.requester)
+        self.answer(proposal())
+        with patch.object(restored,'context',return_value=(self.refs,{},self.context,'digest')):
+            result=restored.chat({'session':paused['session'],'continue_research':paused['research']['id']})
+        self.assertIsNotNone(result['confirmation'])
+        self.assertEqual(result['usage']['calls'],4)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -400,8 +440,10 @@ class ScenarioServiceTests(unittest.TestCase):
 
     def test_invalid_parameter_and_missing_ai_fail_closed(self):
         plan = proposal(); plan['proposal']['entries'][0]['parameter'] = 'invented'
-        self.answer(plan)
-        with self.assertRaises(ValidationError): self.chat({'message': 'Do something.'})
+        for _ in range(3):self.answer(plan)
+        paused=self.service.chat({'message':'Do something.'})
+        self.assertEqual(paused['research']['reason'],'validation')
+        self.assertIsNone(paused['confirmation'])
         with patch('scenario_service.ai_settings.load', return_value={'configured': False}):
             with self.assertRaises(ValidationError): self.chat({'message': 'Do something.'})
         self.assertFalse((self.root/'scenarios').exists())

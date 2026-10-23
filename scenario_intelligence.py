@@ -70,7 +70,10 @@ def narrative_direction(parameter, targets, refs, text):
         matches.extend((m.start(), 'decrease') for m in re.finditer(r'(?:^|[.!;]\s*)democratic regression\b', text, re.IGNORECASE))
     if parameter == 'govindsecurm':
         matches.extend((m.start(), 'decrease') for m in re.finditer(r'\bmore insecurity\b', text, re.IGNORECASE))
-    return max(matches)[1] if matches else None
+    # A phrase elsewhere in the conversation must not override a scoped entry
+    # when users intentionally request opposite changes for different targets.
+    directions={direction for _,direction in matches}
+    return next(iter(directions)) if len(directions)==1 else None
 
 
 def clean(value):
@@ -273,7 +276,13 @@ def preset_entry(entry, refs, baseline):
     return result, receipt
 
 
-def semantic_entries(entries, refs, narrative='', reference_values=None):
+class SemanticIssue(ValidationError):
+    def __init__(self, message, diagnostic):
+        super().__init__(message)
+        self.diagnostic=diagnostic
+
+
+def semantic_entries(entries, refs, narrative='', reference_values=None, base_year=None):
     """Check declared outcome direction; convert cumulative additions to annual flows."""
     prepared, receipts = [], []
     for entry_index, entry in enumerate(entries):
@@ -324,7 +333,21 @@ def semantic_entries(entries, refs, narrative='', reference_values=None):
             if ((desired == 'increase' and (any(d < 0 for d in signed) or not any(d > 0 for d in signed))) or
                 (desired == 'decrease' and (any(d > 0 for d in signed) or not any(d < 0 for d in signed))) or
                 (desired == 'unchanged' and any(d != 0 for d in signed))):
-                raise ValidationError('Direction conflict for '+parameter+': intended '+desired+' in '+rule[0]+'. '+details(refs, parameter)['semantic_rule']['interpretation']+'.')
+                indices=[i for i,d in enumerate(signed) if (d<0 if desired=='increase' else d>0 if desired=='decrease' else d!=0)]
+                index=indices[0] if indices else 0
+                # Reference comparisons include the base year; changes from the first
+                # input begin at index one when no reference trajectory is available.
+                offset=index if reference is not None else index+1
+                diagnostic={'kind':'direction','parameter':parameter,'targets':entry.get('targets',[]),
+                            'intended_direction':desired,'year':None if base_year is None else base_year+offset,
+                            'observed':'opposite direction' if indices else 'no change',
+                            'reference':'saved baseline or original attached input' if reference is not None else 'initial input',
+                            'interpretation':details(refs,parameter)['semantic_rule']['interpretation']}
+                location=' / '.join(map(str,entry.get('targets',[]))) or 'global'
+                raise SemanticIssue('Direction conflict for '+parameter+' / '+location+
+                    (' in '+str(diagnostic['year']) if diagnostic['year'] is not None else '')+
+                    ': declared '+desired+' in '+rule[0]+', but the proposed input has '+diagnostic['observed']+
+                    ' against the '+diagnostic['reference']+'. '+diagnostic['interpretation']+'.',diagnostic)
         meta = details(refs, parameter)
         if any((meta['minimum'] is not None and v < number(meta['minimum'])) or
                (meta['maximum'] is not None and v > number(meta['maximum'])) for v in values):

@@ -43,6 +43,12 @@ class Handler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         try:
             if path == '/bridge/status': return self.send({'running': self.server.service.busy()})
+            if path == '/bridge/usage':
+                identity=parse_qs(urlsplit(self.path).query).get('session',[''])[0]
+                with self.server.service.lock:
+                    session=self.server.service.sessions.get(identity)
+                    if session is None:return self.send({'error':'Unknown session'},404)
+                    return self.send({'usage':session.get('usage',{})})
             if path == '/bridge/capabilities':return self.send({'chat_review':1,'session_cancel':1,'persistent_sessions':1,'approved_execution':1})
             if path == '/api/scenario/download':
                 identity = parse_qs(urlsplit(self.path).query).get('id', [''])[0]

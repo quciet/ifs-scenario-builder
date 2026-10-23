@@ -13,8 +13,11 @@ from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 
 import ai_settings
+import ai_usage
+import time
 from scenario_compiler import Compiler, References, ValidationError, ScenarioRows, integer, number
 from installation_validation import validate_installation
+from scenario_research import preflight, clarification, provider_view, numeric_clarification_issue
 from scenario_intelligence import (Baseline, baseline_path, fingerprint, details, preset_entry, RULES,
     semantic_entries, compact_groups, expand_native_source, expand_subgroups)
 
@@ -22,7 +25,11 @@ MAX_REPEATED_ROUNDS = 3
 
 
 class ScenarioConflict(ValidationError):
-    """Different proposed definitions overlap; the user must resolve intent."""
+    """Separate genuine user choices from repairable generated proposals."""
+    def __init__(self, message, kind='choice', diagnostic=None):
+        super().__init__(message)
+        self.kind=kind
+        self.diagnostic=diagnostic or {'kind':kind,'message':message}
 
 SYSTEM = '''You are the IFs Scenario Builder. Discuss, inspect and propose scenarios in one chat.
 Metadata is cached locally. Reuse supplied results rather than repeating identical lookups.
@@ -51,6 +58,7 @@ unless the user has explicitly specified it; never silently sum, multiply or ove
 Every proposal is a complete replacement of the previous proposal. For attached scenarios, list
 all cumulative approved changes relative to the ORIGINAL attachment, not a previously proposed draft.
 The purpose and regeneration_prompt must be descriptive prose, not arrays, formulas or JSON.
+For a proportional change relative to the saved Current Path parameter trajectory, prefer baseline_scale:{start_factor:1,end_factor:FACTOR,end_year:YEAR,hold_until:YEAR} instead of inventing uniform raw input values. The compiler calculates each country/dimension/year from its actual baseline. Use cumulative_addition for nuclear stock additions, not baseline_scale. Never assume a saved parameter is always one.
 No raw .sce text in replies. Use parameter_details to verify dimensions and subgroup indices.
 For a geographic region or country group, always search_country_groups first. Search names and
 aliases broadly (e.g. Middle East, MENA, Asia). Use country_group_details to inspect exact members.
@@ -172,16 +180,20 @@ def request_model(settings, messages):
     body = {'model': settings['model'], 'messages': messages, 'tools': TOOLS, 'max_tokens': 6000}
     request = Request(settings['endpoint'].rstrip('/') + '/chat/completions',
                       data=json.dumps(body).encode(), headers=headers)
+    started=time.monotonic()
     try:
         with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=60) as response:
             raw = response.read(2_000_001)
         if len(raw) > 2_000_000:
             raise ValidationError('AI response exceeded its size limit.')
-        choice = json.loads(raw)['choices'][0]
-        if choice.get('finish_reason') not in ('stop', 'tool_calls'):
-            raise ValidationError('AI response was incomplete. Try a smaller request.')
+        payload=json.loads(raw)
+        choice = payload['choices'][0]
+        if choice.get('finish_reason') not in ('stop','tool_calls'):
+            error=ValidationError('AI response was incomplete. Completed research is preserved for continuation.')
+            error.ai_usage=ai_usage.event(payload.get('usage'),body,choice.get('message'),time.monotonic()-started,failed=True)
+            raise error
         message = choice['message']
-        return {key: message[key] for key in ('role', 'content', 'tool_calls') if key in message}
+        return {**{key: message[key] for key in ('role','content','tool_calls') if key in message},'_usage':ai_usage.event(payload.get('usage'),body,message,time.monotonic()-started)}
     except HTTPError as exc:
         status = exc.code
         exc.close()
@@ -296,6 +308,11 @@ class ScenarioService:
         return refs, definitions, context, digest
 
     def chat(self, request):
+        result=self._chat(request)
+        result['usage']=ai_usage.merge(self.sessions.get(result.get('session'),{}).get('usage'))
+        return result
+
+    def _chat(self, request):
         if request.get('confirmation'):
             return self.confirm(request)
         continuing = request.get('continue_research')
@@ -353,6 +370,15 @@ class ScenarioService:
             source_summary = None if source is None else {'filename': source.source, 'rows': [
                 {'parameter': row[1], 'targets': row[2:2 + sum(f > 0 for f in refs.dimensions(row[1]))]}
                 for row in source if row and row[0] == 'CUSTOM']}
+            facts=preflight(text,refs,definitions) if not continuing else {'verified':{},'missing':[],'meaning_conflicts':[]}
+            session.setdefault('verified_parameters',{}).update(facts['verified'])
+            for name,value in facts['verified'].items():
+                session['cache'][json.dumps(['parameter_details',{'parameter':name}],sort_keys=True)]=value
+            if facts['missing'] or facts['meaning_conflicts']:
+                response=clarification(facts)
+                session['history'] += [{'role':'user','content':text},{'role':'assistant','content':json.dumps({'reply':response,'proposal':None})}]
+                session['research']=None
+                return {'session':identity,'reply':response,'draft':None,'confirmation':None,'context':context,'preflight':facts}
             if research:
                 messages = list(research['messages'])
                 messages.append({'role': 'user', 'content':
@@ -362,26 +388,43 @@ class ScenarioService:
                 messages = [{'role': 'system', 'content': SYSTEM + '\nModel context: ' + json.dumps(context)
                              + '\nAttached source summary: ' + json.dumps(source_summary)},
                             *session['history'], {'role': 'user', 'content': text}]
+            provider_context={**context,'country_names':sorted(refs.countries),
+                              'verified_parameters':session.get('verified_parameters',{})}
+            root_message={'role':'system','content':SYSTEM+'\nModel context: '+json.dumps(provider_context)+
+                '\nAttached source summary: '+json.dumps(source_summary)+
+                '\nUse the supplied verified parameters directly, including their audited polarity, units and dimensions. Do not search again for exact names already verified. Batch new lookups. Ask for missing user choices before researching unrelated details. Never propose numeric adjustments in clarification text; numeric assumptions belong in a validated proposal. Validate every scoped entry independently. A country-level migration control cannot enforce bilateral routes.'}
+            if messages and messages[0].get('role')=='system':messages[0]=root_message
+            else:messages.insert(0,root_message)
             session['research'] = None
             repeated_rounds = 0
+            validation_failures={}
+
             format_retries = 0
             seen_results={hashlib.sha256(json.dumps(v,sort_keys=True).encode()).hexdigest() for v in session['cache'].values()}
             while True:
                 if session.get('cancelled'):
                     return self.pause(identity, session, messages, context, 'stopped')
-                model_messages = self.compact_metadata(messages)
+                model_messages = self.compact_metadata(provider_view(messages))
                 if len(json.dumps(model_messages)) > 300_000:
                     return self.pause(identity, session, messages, context, 'context')
                 try:
-                    answer = self.requester(settings, model_messages)
-                except ValidationError as error:
+                    started=time.monotonic()
+                    try:answer = self.requester(settings, model_messages)
+                    except Exception as error:
+                        session['usage']=ai_usage.merge(session.get('usage'),getattr(error,'ai_usage',None) or ai_usage.event(None,{'messages':model_messages,'tools':TOOLS},seconds=time.monotonic()-started,failed=True))
+                        raise
+                    receipt=answer.pop('_usage',None) if isinstance(answer,dict) else None
+                    session['usage']=ai_usage.merge(session.get('usage'),receipt or ai_usage.event(None,{'messages':model_messages,'tools':TOOLS},answer,time.monotonic()-started))
+                except (ValidationError,OSError,ValueError) as error:
                     return self.pause(identity, session, messages, context, 'provider', str(error))
                 if session.get('cancelled'):
                     return self.pause(identity, session, messages, context, 'stopped')
                 if not isinstance(answer, dict) or answer.get('role') != 'assistant':
-                    raise ValidationError('AI provider returned an invalid assistant message.')
-                messages.append(answer)
+                    return self.pause(identity,session,messages,context,'format')
                 calls = answer.get('tool_calls') or []
+                if not isinstance(calls,list) or any(not isinstance(c,dict) or not isinstance(c.get('id'),str) or not isinstance(c.get('function'),dict) for c in calls) or len({c['id'] for c in calls})!=len(calls):
+                    return self.pause(identity,session,messages,context,'format')
+                messages.append(answer)
                 if not calls:
                     try:
                         content, reply = self.parse_response(answer.get('content'))
@@ -390,12 +433,38 @@ class ScenarioService:
                             return self.pause(identity, session, messages, context, 'format')
                         format_retries += 1
                         messages[-1] = {**answer, 'content': answer.get('content') or ''}
-                        messages.append({'role': 'user', 'content':
+                        messages.append({'role': 'user', '_internal':True, 'content':
                             'Response format correction only: return a valid JSON object with a nonempty "reply" '
                             'and "proposal". Use proposal:null to ask clarifying questions when magnitudes, '
                             'years, or other assumptions are missing. Preserve my original intent and the '
                             'verified metadata. Do not invent values, parameters or country memberships. '
                             'Return JSON only, without introductory prose or markdown.'})
+                        continue
+                    proposal = reply.get('proposal')
+                    narrative = '\n'.join(m['content'] for m in messages if m['role']=='user' and not m.get('_internal') and isinstance(m.get('content'),str))
+                    try:
+                        issue=numeric_clarification_issue(reply['reply'],narrative,refs) if proposal is None else None
+                        if issue:raise ScenarioConflict(issue['message'],kind='validation',diagnostic=issue)
+                        draft = self.prepare(compiler, source, proposal, context, narrative) if proposal is not None else None
+                    except (ValueError,TypeError,KeyError,ArithmeticError) as error:
+                        if isinstance(error,ScenarioConflict) and error.kind=='choice':
+                            response=str(error)+' No draft was created. '+('Which definition should take precedence for this specific target?' if 'Conflicting trajectories' in str(error) or 'Overlapping' in str(error) else 'Please provide the missing assumption or choose an alternative for this input.')+' The rest of the request is saved.'
+                            session['history']=messages[1:]+[{'role':'assistant','content':json.dumps({'reply':response,'proposal':None})}]
+                            session['research']=None;session['pending']=None
+                            return {'session':identity,'reply':response,'draft':None,'confirmation':None,'context':context,'issues':[error.diagnostic]}
+                        diagnostic=getattr(error,'diagnostic',None) or {'kind':'invalid_proposal','message':str(error)}
+                        signature={k:v for k,v in diagnostic.items() if k not in ('proposed_value','reference_value')}
+                        if diagnostic.get('kind')!='invalid_proposal':signature.pop('message',None)
+                        key=json.dumps(signature,sort_keys=True)
+                        validation_failures[key]=validation_failures.get(key,0)+1
+                        session['candidate']=proposal;session['validation_issues']=[diagnostic]
+                        messages.append({'role':'user','_internal':True,'content':
+                            'LOCAL VALIDATOR FEEDBACK (not a new user instruction): '+json.dumps(diagnostic)+
+                            '\n'+str(error)+'\nRepair the generated proposal against the actual user request, then return the complete replacement proposal. Do not alter intended directions, geography, years or magnitudes merely to pass a check. Use the verified baseline/metadata tools if needed. If a genuine user choice is missing, ask one specific question with proposal:null. Do not ask the user to resolve an internal numeric or direction-label mistake.'})
+                        if validation_failures[key]>=3:
+                            return self.pause(identity,session,messages,context,'validation',str(error))
+                        session['research']={'id':secrets.token_urlsafe(24),'messages':list(messages),'reason':'interrupted'}
+                        self.persist_sessions()
                         continue
                     break
                 new_lookups = 0
@@ -436,22 +505,6 @@ class ScenarioService:
                 with self.lock:
                     session['research']={'id':secrets.token_urlsafe(24),'messages':list(messages),'reason':'interrupted'}
                 self.persist_sessions()
-            try:
-                proposal = reply.get('proposal')
-                narrative = '\n'.join(m['content'] for m in messages if m['role'] == 'user' and isinstance(m.get('content'), str))
-                draft = self.prepare(compiler, source, proposal, context, narrative) if proposal is not None else None
-            except ScenarioConflict as exc:
-                clarification = (str(exc) + ' No draft was created. Which definition should apply to this target? '
-                    'Please specify the intended trajectory or which group/country rule takes precedence.')
-                with self.lock:
-                    session['history'] = messages[1:] + [{'role': 'assistant', 'content': json.dumps(
-                        {'reply': clarification, 'proposal': None})}]
-                    session['research'] = None
-                    session['pending'] = None
-                return {'session': identity, 'reply': clarification, 'draft': None,
-                        'confirmation': None, 'context': context}
-            except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
-                raise ValidationError('The AI proposal could not be validated. No draft was accepted. ' + str(exc)) from None
             with self.lock:
                 if session.get('cancelled'):
                     return self.pause(identity, session, messages, context, 'stopped')
@@ -494,6 +547,7 @@ class ScenarioService:
     def pause(self, identity, session, messages, context, reason, detail=''):
         explanations = {
             'repeated': 'The AI repeated metadata lookups without finding new information.',
+            'validation': 'The AI could not repair its generated proposal. Your request and candidate are saved; Continue retries from the validation details. You do not need to repeat clear instructions. '+detail,
             'interrupted': 'Research was interrupted. Completed lookups are saved.',
             'stopped': 'Research stopped.',
             'context': 'The conversation needs a shorter or more focused request.',
@@ -536,6 +590,8 @@ class ScenarioService:
             terms = str(args['query']).casefold().split()
             found = [g for g in refs.country_groups.values() if all(
                 t in (g['name']+' '+g['long_name']+' '+g['alias']).casefold() for t in terms)]
+            query=' '.join(str(args['query']).casefold().split())
+            found.sort(key=lambda g:(0 if query in (g['name'].casefold(),g['alias'].casefold()) else 1,g['name']))
             result = {'matches': [{k: g[k] for k in ('id', 'name', 'long_name', 'alias')} |
                       {'country_count': len(g['countries']), 'usable': bool(g['countries']) and not g['invalid_members']}
                       for g in found[:50]], 'total': len(found),
@@ -600,12 +656,24 @@ class ScenarioService:
                 raise ValidationError('A new scenario requires parameter entries.')
             entries = []
             for entry in proposal['entries']:
+                if sum(key in entry for key in ('values', 'ramp', 'preset', 'baseline_scale', 'cumulative_addition')) > 1:
+                    raise ValidationError('Use exactly one trajectory specification per entry.')
                 if 'preset' in entry:
                     try:
                         entry, receipt = preset_entry(entry, compiler.references, baseline)
                     except (ValidationError, OSError, sqlite3.Error) as error:
                         raise ScenarioConflict('IFs preset needs clarification: '+str(error)) from None
                     presets.append(receipt)
+                if 'baseline_scale' in entry:
+                    if entry['parameter'] == 'govnucwpadd':
+                        raise ValidationError('Use cumulative_addition for nuclear stock additions.')
+                    if not baseline:raise ValidationError('A selected IFs baseline is required for relative scaling.')
+                    scale=entry['baseline_scale'];end=scale['end_year'];hold=scale.get('hold_until',end)
+                    if type(end)!=int or type(hold)!=int or not compiler.base_year<end<=hold<=2500:raise ValidationError('Baseline scaling years must follow the base year and end by 2500.')
+                    start,finish=number(scale.get('start_factor',1)),number(scale['end_factor'])
+                    if start!=1:raise ValidationError('Baseline scaling must begin with an unchanged base year (start_factor=1).')
+                    values=[str(baseline.value(entry['parameter'],entry.get('targets',[]),year)*(start+(finish-start)*Decimal(min(year,end)-compiler.base_year)/Decimal(end-compiler.base_year))) for year in range(compiler.base_year,hold+1)]
+                    entry={**{k:v for k,v in entry.items() if k!='baseline_scale'},'values':values}
                 entries.append(entry)
             entries = expand_entries(entries, compiler.base_year)
             try:
@@ -620,9 +688,9 @@ class ScenarioService:
                                            for i in range(len(entry['values']))])
                     else:
                         references.append(None)
-                entries, semantics = semantic_entries(entries, compiler.references, narrative, references)
+                entries, semantics = semantic_entries(entries, compiler.references, narrative, references, compiler.base_year)
             except (ValidationError, OSError, sqlite3.Error) as error:
-                raise ScenarioConflict('Semantic check: '+str(error)) from None
+                raise ScenarioConflict('Semantic check: '+str(error),kind='validation',diagnostic=getattr(error,'diagnostic',None)) from None
             if any(len(e['values']) > 2500 - compiler.base_year + 1 for e in entries):
                 raise ValidationError('Scenario trajectory exceeds year 2500.')
             rows = ScenarioRows()
@@ -694,7 +762,7 @@ class ScenarioService:
                         _, receipts = semantic_entries([{'parameter': change['parameter'], 'targets': prefix[2:],
                             'values': after[2+count:], 'effect': change.get('effect')}], compiler.references, narrative, [before[2+count:]])
                     except ValidationError as error:
-                        raise ScenarioConflict('Semantic check: '+str(error)) from None
+                        raise ScenarioConflict('Semantic check: '+str(error),kind='validation',diagnostic=getattr(error,'diagnostic',None)) from None
                     semantics.extend(receipts)
         purpose, prompt = proposal['purpose'], proposal['regeneration_prompt']
         # Run all export validation before presenting the draft.
@@ -731,7 +799,7 @@ class ScenarioService:
                 raise ScenarioConflict('Cannot verify existing nuclear-state coverage: '+str(error)) from None
             targeted = {r['targets'][0] for r in review_rows if r['parameter'] == 'govnucwpadd'}
             if armed-targeted:
-                raise ScenarioConflict('The narrative asks for all existing nuclear-armed states, but stockpile additions omit: '+', '.join(sorted(armed-targeted))+'.')
+                raise ScenarioConflict('The narrative asks for all existing nuclear-armed states, but stockpile additions omit: '+', '.join(sorted(armed-targeted))+'.',kind='validation',diagnostic={'kind':'coverage','parameter':'govnucwpadd','missing_countries':sorted(armed-targeted)})
         if re.search(r'intra[- ]African', narrative, re.IGNORECASE) and any(r['parameter'] in ('migrateinm','migrateoutm') for r in review_rows):
             warnings.append('Country-level migration multipliers do not restrict the added flows to Africa-to-Africa. This is a migration approximation, not an exact bilateral route intervention.')
         if re.search(r'military\s+participation', narrative, re.IGNORECASE):

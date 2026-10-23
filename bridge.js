@@ -3,7 +3,7 @@ async function api(path,body){
   const token=parent.document.querySelector('meta[name=companion-token]')?.content;
   if(window.companionInlineChat&&path==='/api/scenario/chat'){
     const response=await fetch('/api/chats/scenario',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-Token':token||''},body:JSON.stringify({id:window.companionInlineChat,...body})});
-    const data=await response.json();if(!response.ok)throw Error(data.error||'Request failed.');return data;
+    const data=await response.json();if(!response.ok)throw Error(data.error||'Request failed.');parent.postMessage({type:'companion-scenario-updated'},location.origin);return data;
   }
   const response=await fetch(path.replace(/^\//,''),body?{method:'POST',headers:{'Content-Type':'application/json','X-Companion-Token':token||''},body:JSON.stringify(body)}:{});
   const data=await response.json();if(!response.ok)throw Error(data.error||'Request failed.');

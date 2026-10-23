@@ -47,8 +47,8 @@
     el('scenarioFilename').value=draft.filename;el('scenarioRegeneration').textContent=draft.regeneration_prompt;
     options(el('scenarioParameter'),[...parameters].sort().map(p=>[p,p]));
   }
-  function receive(result){
-    session=result.session;message(result.reply,'assistant');renderDraft(result.draft);updateComposer();
+  function receive(result,showReply=true){
+    session=result.session;if(showReply)message(result.reply,'assistant');renderDraft(result.draft);updateComposer();
     el('scenarioContext').textContent=result.context.version+' · Base year '+result.context.base_year+' · '+result.context.installation;
     pending=result.confirmation||null;
     research=result.research||null;
@@ -144,7 +144,7 @@
       window.companionInlineChat=options.chat;
       new ResizeObserver(()=>parent.postMessage({type:'companion-scenario-height',height:document.documentElement.scrollHeight},location.origin)).observe(document.body);
     }
-    resetDraft();el('scenarioMessages').replaceChildren();receive(result);
+    resetDraft();el('scenarioMessages').replaceChildren();receive(result,!options.inline);
     el('scenarioForm').hidden=true;el('scenarioNew').hidden=true;
     const revise=document.createElement('p');revise.textContent='Describe revisions in the main Companion chat. Approval here applies only to this proposal.';
     if(!options.inline)el('scenarioMessages').prepend(revise);
