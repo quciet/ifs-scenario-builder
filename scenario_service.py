@@ -18,7 +18,6 @@ from installation_validation import validate_installation
 from scenario_intelligence import (Baseline, baseline_path, fingerprint, details, preset_entry, RULES,
     semantic_entries, compact_groups, expand_native_source, expand_subgroups)
 
-MAX_METADATA_ROUNDS = 16
 MAX_REPEATED_ROUNDS = 3
 
 
@@ -366,7 +365,8 @@ class ScenarioService:
             session['research'] = None
             repeated_rounds = 0
             format_retries = 0
-            for _ in range(MAX_METADATA_ROUNDS):
+            seen_results={hashlib.sha256(json.dumps(v,sort_keys=True).encode()).hexdigest() for v in session['cache'].values()}
+            while True:
                 if session.get('cancelled'):
                     return self.pause(identity, session, messages, context, 'stopped')
                 model_messages = self.compact_metadata(messages)
@@ -416,11 +416,14 @@ class ScenarioService:
                             result = session['cache'][key]
                             session['cache_hits'] += 1
                         else:
-                            new_lookups += 1
                             try:
                                 result = self.lookup(name, args, refs, definitions, source, compiler)
                             except (ValueError, KeyError, TypeError) as error:
                                 result = {'error': str(error)}
+                            signature=hashlib.sha256(json.dumps(result,sort_keys=True).encode()).hexdigest()
+                            if not (isinstance(result,dict) and result.get('error')) and signature not in seen_results:
+                                new_lookups += 1
+                                seen_results.add(signature)
                             session['cache'][key] = result
                     except (ValueError, KeyError, TypeError) as error:
                         result = {'error': str(error)}
@@ -430,8 +433,9 @@ class ScenarioService:
                     return self.pause(identity, session, messages, context, 'stopped')
                 if repeated_rounds >= MAX_REPEATED_ROUNDS:
                     return self.pause(identity, session, messages, context, 'repeated')
-            else:
-                return self.pause(identity, session, messages, context, 'rounds')
+                with self.lock:
+                    session['research']={'id':secrets.token_urlsafe(24),'messages':list(messages),'reason':'interrupted'}
+                self.persist_sessions()
             try:
                 proposal = reply.get('proposal')
                 narrative = '\n'.join(m['content'] for m in messages if m['role'] == 'user' and isinstance(m.get('content'), str))
@@ -490,7 +494,7 @@ class ScenarioService:
     def pause(self, identity, session, messages, context, reason, detail=''):
         explanations = {
             'repeated': 'The AI repeated metadata lookups without finding new information.',
-            'rounds': 'Research reached the AI round-trip checkpoint.',
+            'interrupted': 'Research was interrupted. Completed lookups are saved.',
             'stopped': 'Research stopped.',
             'context': 'The conversation needs a shorter or more focused request.',
             'format': 'The AI returned an empty or incorrectly formatted response even after a format retry.',

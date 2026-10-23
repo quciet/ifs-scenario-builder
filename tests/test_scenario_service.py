@@ -285,19 +285,25 @@ class ScenarioServiceTests(unittest.TestCase):
         self.assertEqual(sum(m['role'] == 'tool' for m in messages), 4)
         with self.assertRaises(ValidationError): self.service.chat(request)
 
-    def test_round_checkpoint_is_resumable_and_can_be_revised(self):
-        for query in ('yield', 'agriculture'): self.metadata([('search_parameters', {'query': query})])
-        with patch('scenario_service.MAX_METADATA_ROUNDS', 2):
-            paused = self.service.chat({'message': 'Research yield changes.'})
-        self.assertEqual(paused['research']['reason'], 'rounds')
-        self.answer({'reply': 'Which years should I use?', 'proposal': None})
-        self.service.chat({'session': paused['session'], 'message': 'Use 2100 and only Iraq.'})
-        messages = self.seen[-1][1]
-        self.assertTrue(any(m.get('content') == 'Research yield changes.' for m in messages))
-        self.assertEqual(messages[-1]['content'], 'Use 2100 and only Iraq.')
-        self.assertEqual(sum(m['role'] == 'tool' for m in messages), 2)
-        with self.assertRaises(ValidationError):
-            self.service.chat({'session': paused['session'], 'continue_research': paused['research']['id']})
+    def test_40_productive_rounds_do_not_pause(self):
+        for i in range(40):
+            name='parameter'+str(i)
+            self.refs.parameters[name]=(1,0,0)
+            self.metadata([('parameter_details',{'parameter':name})])
+        self.answer({'reply':'Research complete. Which years should I use?','proposal':None})
+        result=self.service.chat({'message':'Research many parameter controls.'})
+        self.assertNotIn('research',result)
+        self.assertIn('Research complete',result['reply'])
+        self.assertEqual(sum(m['role']=='tool' for m in self.seen[-1][1]),40)
+
+    def test_distinct_queries_returning_same_result_pause_for_no_progress(self):
+        for i in range(4):self.metadata([('search_parameters',{'query':'missing-'+str(i)})])
+        with patch.object(self.service,'lookup',return_value={'matches':[]}):
+            paused=self.service.chat({'message':'Research yield controls.'})
+        self.assertEqual(paused['research']['reason'],'repeated')
+        self.answer({'reply':'Which years?','proposal':None})
+        result=self.service.chat({'session':paused['session'],'continue_research':paused['research']['id']})
+        self.assertEqual(result['reply'],'Which years?')
 
     def test_provider_failure_and_stop_keep_research(self):
         self.metadata([('parameter_details', {'parameter': 'ylm'})])

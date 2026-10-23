@@ -1,7 +1,7 @@
-# Scenario Builder 0.4.2
+# Scenario Builder 0.4.3
 
 Scenario Builder is an optional IFsCompanion tool, distributed separately as
-`ifs-scenario-builder-0.4.2-win-x64.ifstool`. Companion 0.3.5 or newer is required.
+`ifs-scenario-builder-0.4.3-win-x64.ifstool`. Companion 0.3.6 or newer is required.
 Model Vetting is the only tool included by default in Companion.
 
 In Companion, open Settings > Manage tools and install Scenario Builder from the
@@ -53,13 +53,12 @@ Python runtime; users do not need a separate Python installation.
 
 Research supports large local metadata batches without a parameter lookup count
 cap. Identical lookups are cached within the chat. Repeated cycles without new
-metadata, the AI round-trip checkpoint, and connection interruptions pause with
+metadata and connection interruptions pause with
 **Continue researching** and **Revise request** actions. Both preserve the original
 request, attached source, and lookup results. **Stop** pauses research after the
 current provider call returns. Old metadata exchanges can be omitted from the
 provider context to keep it bounded; the full transcript and results remain local
-and are available through the metadata tools. Progress is in memory for the current
-chat and does not survive restarting the tool. Parameter/country validation and
+and are available through the metadata tools. Completed metadata exchanges are saved locally and can be restored after restarting the tool. Productive research has no fixed round-count cutoff. Parameter/country validation and
 explicit confirmation before preview/export remain mandatory.
 
 Empty or incorrectly formatted AI answers receive one format-only retry. If the
@@ -73,7 +72,7 @@ attachment edits prompt a clarification instead of silently overwriting or
 compounding the changes. Research and the original request stay in the chat.
 
 
-Version 0.4.2 reads parameter explanations, units, bounds, shift-up/down settings,
+Version 0.4.3 reads parameter explanations, units, bounds, shift-up/down settings,
 shift durations and aggregation/common-target flags from the selected installation.
 Its high/low/base tool reads actual country/dimension values from
 `RUNFILES/IFsBase.run.db` using Companion's bundled baseline decoder, read-only.
@@ -130,4 +129,4 @@ set `IFS_COMPANION_APP_DIR` to the host/decoder location.
 The shared-Python package is the supported build format. The obsolete PyInstaller
 prototype builder has been retired. Official release assets and the update catalog
 remain in `quciet/ifs-companion`, consistent with the other tools. This source move
-does not change tool IDs, installed data paths, or the published 0.4.2 package.
+does not change tool IDs, installed data paths, or the published 0.4.3 package.
