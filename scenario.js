@@ -56,7 +56,7 @@
       const value=research,card=message(value.lookups+' metadata results preserved · '+value.cache_hits+' repeated lookups served from cache.','assistant','Scenario Builder · Research paused');
       const resume=document.createElement('button');resume.type='button';resume.className='scenario-continue-button';resume.textContent='Continue researching';
       resume.onclick=async()=>{if(busy||research?.id!==value.id)return;setBusy(true);resume.disabled=true;note('Continuing with preserved research…');try{receive(await api('/api/scenario/chat',{session,continue_research:value.id}));}catch(error){note(error.message,true);resume.disabled=false;}finally{setBusy(false);}};
-      const revise=document.createElement('button');revise.type='button';revise.textContent='Revise request';revise.onclick=()=>el('scenarioPrompt').focus();card.append(resume,revise);
+      const revise=document.createElement('button');revise.type='button';revise.textContent='Revise request';revise.onclick=()=>{if(window.companionInlineChat)parent.postMessage({type:'companion-scenario-revise'},location.origin);else el('scenarioPrompt').focus();};card.append(resume,revise);
     }
     if(pending){
       const value=pending,card=message('','assistant','Scenario Builder · Confirmation');
@@ -74,7 +74,7 @@
       for(const group of value.geographies){const details=document.createElement('details'),label=document.createElement('summary'),members=document.createElement('p');label.textContent=group.kind+' · '+group.name+' · '+group.countries.length+' countries';members.textContent=group.countries.join(', ');details.append(label,members);card.append(details);}
       const approve=document.createElement('button');approve.type='button';approve.className='scenario-confirm-button';approve.textContent='Confirm and build draft';
       approve.onclick=async()=>{if(busy||pending?.id!==value.id)return;setBusy(true);approve.disabled=true;note('Building confirmed draft…');try{const result=await api('/api/scenario/chat',{session,confirmation:value.id});receive(result);}catch(error){note(error.message,true);approve.disabled=false;}finally{setBusy(false);}};
-      const revise=document.createElement('button');revise.type='button';revise.textContent='Revise in chat';revise.onclick=()=>el('scenarioPrompt').focus();card.append(approve,revise);el('scenarioMessages').append(card);card.scrollIntoView({block:'nearest'});
+      const revise=document.createElement('button');revise.type='button';revise.textContent='Revise in chat';revise.onclick=()=>{if(window.companionInlineChat)parent.postMessage({type:'companion-scenario-revise'},location.origin);else el('scenarioPrompt').focus();};card.append(approve,revise);el('scenarioMessages').append(card);card.scrollIntoView({block:'nearest'});
     }
     note(research?'Research is paused. Continue or send a revised request; your progress is kept.':pending?'Review the scope and country membership, then confirm or describe a revision.':result.draft?'Confirmed draft ready to inspect. Saving is a separate step.':'');
   }
@@ -138,11 +138,17 @@
   async function stopResearch(){note('Stopping after the current AI call returns…');try{await api('/bridge/stop',session?{session}:{});}catch(error){note(error.message,true);}}
   el('scenarioStop').onclick=stopResearch;
   window.scenarioChat={start(prompt=''){navigate('scenario');el('scenarioPrompt').value=prompt;sizePrompt();el('scenarioPrompt').focus();},stop:stopResearch};
-  window.companionScenario={open(result){
+  window.companionScenario={open(result,options={}){
+    if(options.inline){
+      document.body.classList.add('companion-inline');
+      window.companionInlineChat=options.chat;
+      new ResizeObserver(()=>parent.postMessage({type:'companion-scenario-height',height:document.documentElement.scrollHeight},location.origin)).observe(document.body);
+    }
     resetDraft();el('scenarioMessages').replaceChildren();receive(result);
     el('scenarioForm').hidden=true;el('scenarioNew').hidden=true;
     const revise=document.createElement('p');revise.textContent='Describe revisions in the main Companion chat. Approval here applies only to this proposal.';
-    el('scenarioMessages').prepend(revise);
+    if(!options.inline)el('scenarioMessages').prepend(revise);
+    else for(const button of el('scenarioMessages').querySelectorAll('button'))if(button.textContent==='Revise in chat')button.onclick=()=>parent.postMessage({type:'companion-scenario-revise'},location.origin);
     if(!el('scenarioRun')){
       const year=document.createElement('input');year.id='scenarioRunYear';year.type='number';year.min=String(result.context.base_year);year.max='2100';year.value='2100';year.setAttribute('aria-label','Model run end year');
       const run=document.createElement('button');run.id='scenarioRun';run.type='button';run.textContent='Review model run…';

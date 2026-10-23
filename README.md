@@ -1,12 +1,12 @@
-# Scenario Builder 0.4.0
+# Scenario Builder 0.4.2
 
 Scenario Builder is an optional IFsCompanion tool, distributed separately as
-`ifs-scenario-builder-0.4.0-win-x64.ifstool`. Companion 0.3.0 or newer is required.
+`ifs-scenario-builder-0.4.2-win-x64.ifstool`. Companion 0.3.5 or newer is required.
 Model Vetting is the only tool included by default in Companion.
 
 In Companion, open Settings > Manage tools and install Scenario Builder from the
 official catalog, or choose Add from file and select the `.ifstool` download.
-Then open Scenario Builder from Tools. Uninstalling keeps the tool's saved data.
+Then describe the scenario in the main Companion chat. Scenario Builder is a backend capability, not a separate chat destination. Proposals, confirmation, file inspection and export appear inline in that conversation. Revisions and optional .sce attachments use the main composer. Uninstalling keeps the tool's saved data.
 
 Select the IFs installation and configure the shared AI connection in Companion
 Settings. The provider must support Chat Completions function tools. The tool
@@ -73,7 +73,7 @@ attachment edits prompt a clarification instead of silently overwriting or
 compounding the changes. Research and the original request stay in the chat.
 
 
-Version 0.4.0 reads parameter explanations, units, bounds, shift-up/down settings,
+Version 0.4.2 reads parameter explanations, units, bounds, shift-up/down settings,
 shift durations and aggregation/common-target flags from the selected installation.
 Its high/low/base tool reads actual country/dimension values from
 `RUNFILES/IFsBase.run.db` using Companion's bundled baseline decoder, read-only.
@@ -130,4 +130,4 @@ set `IFS_COMPANION_APP_DIR` to the host/decoder location.
 The shared-Python package is the supported build format. The obsolete PyInstaller
 prototype builder has been retired. Official release assets and the update catalog
 remain in `quciet/ifs-companion`, consistent with the other tools. This source move
-does not change tool IDs, installed data paths, or the published 0.4.0 package.
+does not change tool IDs, installed data paths, or the published 0.4.2 package.
